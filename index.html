@@ -156,6 +156,18 @@
     box-shadow:0 4px 10px rgba(0,0,0,.2);
   }
   .swap-btn button:active{transform:scale(0.92);}
+  .usd-row{
+    text-align:center;
+    font-size:12.5px;
+    color:var(--muted);
+    margin-top:10px;
+    padding-top:10px;
+    border-top:1px dashed #e5e9f5;
+  }
+  .usd-row b{
+    color:var(--text);
+    font-size:14px;
+  }
   /* presets */
   .presets{
     display:flex;
@@ -308,6 +320,8 @@
       <div class="conv-amount output" id="bottomAmount">0</div>
     </div>
 
+    <div class="usd-row" id="usdRow">🇺🇸 미화 약 <b id="usdValue">$0.00</b> USD</div>
+
     <div class="presets" id="presets"></div>
 
     <div class="mic-row">
@@ -344,9 +358,10 @@
 (function(){
   // ---------- 상태 ----------
   var state = {
-    direction: 'KRW_TO_PHP',   // or 'PHP_TO_KRW'
+    direction: 'PHP_TO_KRW',   // or 'KRW_TO_PHP' — 기본을 페소 입력으로 시작
     amount: '',                 // 입력 문자열 (위쪽 박스 기준)
-    rate: 0.0413                // 1 KRW = rate PHP (기본 참고값)
+    rate: 0.0413,                // 1 KRW = rate PHP (기본 참고값)
+    usdRate: 0.00074             // 1 KRW = usdRate USD (기본 참고값)
   };
 
   var els = {
@@ -365,7 +380,8 @@
     micBtn: document.getElementById('micBtn'),
     voiceTranscript: document.getElementById('voiceTranscript'),
     unsupportedMsg: document.getElementById('unsupportedMsg'),
-    presets: document.getElementById('presets')
+    presets: document.getElementById('presets'),
+    usdValue: document.getElementById('usdValue')
   };
 
   var LABELS = {
@@ -403,12 +419,18 @@
     els.topAmount.textContent = state.amount ? addCommas(state.amount) : '0';
 
     var result;
+    var krwAmount;
     if (state.direction === 'KRW_TO_PHP') {
       result = amountNum * state.rate;
+      krwAmount = amountNum;
     } else {
       result = state.rate > 0 ? amountNum / state.rate : 0;
+      krwAmount = result;
     }
     els.bottomAmount.textContent = fmt(result);
+
+    var usdAmount = krwAmount * state.usdRate;
+    els.usdValue.textContent = '$' + usdAmount.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
 
     els.rateDisplay.textContent = '1,000원 ≈ ' + fmt(1000 * state.rate) + ' 페소';
     els.rateInput.value = state.rate;
@@ -482,6 +504,7 @@
       .then(function(data){
         if (data && data.rates && data.rates.PHP) {
           state.rate = data.rates.PHP;
+          if (data.rates.USD) state.usdRate = data.rates.USD;
           var updated = data.time_last_update_utc || '';
           els.rateStatus.textContent = '실시간 환율 적용됨 (' + updated + ')';
           render();
@@ -585,72 +608,70 @@
   }
 
   // 한국어로 말한 숫자를 실제 숫자로 변환
-  // 1) "오만 원", "십만원" 같은 한자어 숫자 표현 지원
-  // 2) "50000", "5,000" 같은 아라비아 숫자 표현 지원
+  // 1) "오만 원", "십만원" 같은 순수 한자어 숫자 표현 지원
+  // 2) "50000", "5,000" 같은 순수 아라비아 숫자 표현 지원
+  // 3) "7만 2천", "3천5백" 처럼 구글 STT가 자주 만들어내는
+  //    아라비아 숫자 + 한글 단위가 섞인 표현도 지원 (예: "7만2천" = 72000)
   function parseSpokenNumber(text){
     if (!text) return null;
-    var cleaned = text.trim();
-
-    // 아라비아 숫자가 포함된 경우 우선 추출
-    var digitMatch = cleaned.replace(/,/g, '').match(/\d+(\.\d+)?/);
-    // 한글 숫자 단어가 섞여있지 않고 순수 숫자 표현이면 바로 사용
+    var cleaned = text.trim().replace(/,/g, '');
     var hasHangulNumberWord = /[일이삼사오육륙칠팔구영공십백천만억조]/.test(cleaned);
 
-    if (digitMatch && !hasHangulNumberWord) {
-      var n = parseFloat(digitMatch[0]);
+    if (!hasHangulNumberWord) {
+      var m = cleaned.match(/\d+(\.\d+)?/);
+      if (!m) return null;
+      var n = parseFloat(m[0]);
       return isNaN(n) ? null : n;
     }
 
-    if (hasHangulNumberWord) {
-      var n2 = koreanWordsToNumber(cleaned);
-      if (n2 !== null && n2 > 0) return n2;
-    }
-
-    if (digitMatch) {
-      var n3 = parseFloat(digitMatch[0]);
-      if (!isNaN(n3)) return n3;
-    }
-
-    return null;
+    var n2 = parseKoreanAmount(cleaned);
+    return (n2 !== null && n2 > 0) ? n2 : null;
   }
 
-  function koreanWordsToNumber(text){
-    // 통화 단위, 공백, 조사 등 제거하고 숫자 관련 한글만 남김
-    var filtered = text.replace(/[^일이삼사오육륙칠팔구영공십백천만억조]/g, '');
-    if (!filtered) return null;
+  // 아라비아 숫자 덩어리와 한글 숫자 단위(영~구, 십/백/천, 만/억/조)를
+  // 토큰으로 나눈 뒤, 같은 규칙으로 계산한다.
+  // 예: "7만 2천 페소" -> [num7, big만, num2, small천] -> 72000
+  function parseKoreanAmount(text){
+    var tokenChars = text.match(/[0-9]+|[일이삼사오육륙칠팔구영공십백천만억조]/g);
+    if (!tokenChars || !tokenChars.length) return null;
 
     var digitMap = {'영':0,'공':0,'일':1,'이':2,'삼':3,'사':4,'오':5,'육':6,'륙':6,'칠':7,'팔':8,'구':9};
     var smallUnit = {'십':10,'백':100,'천':1000};
-    var bigUnit = {'조':1e12,'억':1e8,'만':1e4};
+    var bigUnit = {'만':1e4,'억':1e8,'조':1e12};
 
-    function parseChunk(str){
-      var result = 0, current = 0;
-      for (var i = 0; i < str.length; i++){
-        var ch = str[i];
-        if (digitMap.hasOwnProperty(ch)) {
-          current = digitMap[ch];
-        } else if (smallUnit.hasOwnProperty(ch)) {
+    var tokens = tokenChars.map(function(t){
+      if (/^[0-9]+$/.test(t)) return {type:'num', value: parseInt(t, 10)};
+      if (digitMap.hasOwnProperty(t)) return {type:'num', value: digitMap[t]};
+      if (smallUnit.hasOwnProperty(t)) return {type:'small', value: smallUnit[t]};
+      return {type:'big', value: bigUnit[t]};
+    });
+
+    function parseChunk(chunkTokens){
+      var result = 0, current = 0, seen = false;
+      chunkTokens.forEach(function(tok){
+        if (tok.type === 'num') { current = tok.value; seen = true; }
+        else if (tok.type === 'small') {
           if (current === 0) current = 1;
-          result += current * smallUnit[ch];
+          result += current * tok.value;
           current = 0;
+          seen = true;
         }
-      }
+      });
       result += current;
-      return result;
+      return seen ? result : 0;
     }
 
     var total = 0;
-    var buffer = '';
-    for (var i = 0; i < filtered.length; i++){
-      var ch = filtered[i];
-      if (bigUnit.hasOwnProperty(ch)) {
+    var buffer = [];
+    tokens.forEach(function(tok){
+      if (tok.type === 'big') {
         var chunkVal = buffer.length ? parseChunk(buffer) : 1;
-        total += chunkVal * bigUnit[ch];
-        buffer = '';
+        total += chunkVal * tok.value;
+        buffer = [];
       } else {
-        buffer += ch;
+        buffer.push(tok);
       }
-    }
+    });
     total += parseChunk(buffer);
     return total;
   }
