@@ -312,7 +312,7 @@
 
     <div class="mic-row">
       <button class="mic-btn" id="micBtn">🎤</button>
-      <div class="mic-hint">마이크 버튼을 누르고 <b>"오만 원"</b> 또는 <b>"5000"</b>처럼 숫자를 말하면 자동으로 계산돼요.</div>
+      <div class="mic-hint">마이크 버튼을 누르고 <b>"오만 원"</b> 또는 <b>"5000"</b>처럼 숫자를 말하세요. 계속 듣기만 하고 안 멈추면 마이크 버튼을 <b>한 번 더</b> 눌러 종료하세요.</div>
     </div>
     <div class="voice-transcript" id="voiceTranscript"></div>
     <div class="unsupported" id="unsupportedMsg">이 브라우저는 음성 인식을 지원하지 않아요. Chrome 브라우저에서 이용해 주세요.</div>
@@ -503,19 +503,37 @@
     recognition = new SpeechRecognition();
     recognition.lang = 'ko-KR';
     recognition.interimResults = false;
+    recognition.continuous = false;
     recognition.maxAlternatives = 3;
+
+    var micSafetyTimer = null;
+    function clearMicSafetyTimer(){
+      if (micSafetyTimer) { clearTimeout(micSafetyTimer); micSafetyTimer = null; }
+    }
 
     recognition.onstart = function(){
       recognizing = true;
       els.micBtn.classList.add('listening');
-      els.voiceTranscript.textContent = '듣고 있어요...';
+      els.voiceTranscript.textContent = '듣고 있어요... (말이 끝나면 자동으로 멈춰요)';
+      // 일부 안드로이드 Chrome은 말이 끝나도 자동으로 멈추지 않는 버그가 있어
+      // 안전장치로 8초 후 강제 종료
+      clearMicSafetyTimer();
+      micSafetyTimer = setTimeout(function(){
+        try { recognition.stop(); } catch(e){}
+      }, 8000);
+    };
+    // 말이 끝난 걸 감지하면 바로 종료 시도 (안드로이드 Chrome 버그 우회)
+    recognition.onspeechend = function(){
+      try { recognition.stop(); } catch(e){}
     };
     recognition.onend = function(){
       recognizing = false;
+      clearMicSafetyTimer();
       els.micBtn.classList.remove('listening');
     };
     recognition.onerror = function(e){
       recognizing = false;
+      clearMicSafetyTimer();
       els.micBtn.classList.remove('listening');
       var msg = '음성 인식 오류가 발생했어요.';
       if (e.error === 'not-allowed' || e.error === 'permission-denied') {
